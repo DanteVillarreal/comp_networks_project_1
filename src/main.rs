@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-// use rand::Rng;
+use rand::Rng;
 use rand_distr::{Distribution, Exp};
 use plotters::prelude::*;
 
@@ -12,8 +12,8 @@ struct SimulationResult {
 }
 #[derive(Debug)]
 enum EventType {
-    Arrival,
-    Departure,
+    Arrival { customer_id: u32 },    // Added customer_id to track arrivals
+    Departure { customer_id: u32 },   // Added customer_id to track departures
 }
 
 #[derive(Debug)]
@@ -23,6 +23,7 @@ struct Event {
 }
 
 struct Simulation {
+    // Previous fields remain...
     lambda: f64,     
     mu: f64,         
     rho: f64,        
@@ -32,44 +33,64 @@ struct Simulation {
     total_customers: u32,
     cumulative_time: f64,
     cumulative_customers: f64,
+    
+    // New fields for tracking customer response times
+    arrival_times: std::collections::HashMap<u32, f64>,
+    total_response_time: f64,
+    completed_customers: u32,
 }
 
 impl Simulation {
     /// Create a new simulation with given arrival and service rates
     fn new(lambda: f64, mu: f64) -> Self {
-        let rho = lambda / mu;
         Simulation {
             lambda,
             mu,
-            rho,
+            rho: lambda / mu,
             current_time: 0.0,
             customers_in_system: 0,
             event_queue: VecDeque::new(),
             total_customers: 0,
             cumulative_time: 0.0,
             cumulative_customers: 0.0,
+            arrival_times: std::collections::HashMap::new(),
+            total_response_time: 0.0,
+            completed_customers: 0,
         }
     }
 
-    /// Schedule an initial arrival event
-    fn schedule_initial_arrival(&mut self) {
-        let arrival_time = self.generate_interarrival_time();
-        self.event_queue.push_back(Event {
-            time: arrival_time,
-            event_type: EventType::Arrival,
-        });
-    }
+    // /// Schedule an initial arrival event
+    // fn schedule_initial_arrival(&mut self) {
+    //     let arrival_time = self.generate_interarrival_time();
+    //     self.event_queue.push_back(Event {
+    //         time: arrival_time,
+    //         event_type: EventType::Arrival { customer_id: 0 },  // First customer has ID 0
+    //     });
+    // }
 
-    /// Generate time until next arrival (exponential with rate lambda)
-    fn generate_interarrival_time(&self) -> f64 {
-        let exp = Exp::new(self.lambda).unwrap();
-        exp.sample(&mut rand::thread_rng())
-    }
+    // /// Generate time until next arrival (exponential with rate lambda)
+    // fn generate_interarrival_time(&self) -> f64 {
+    //     let exp = Exp::new(self.lambda).unwrap();
+    //     exp.sample(&mut rand::thread_rng())
+    // }
 
-    /// Generate service time (exponential with rate mu)
-    fn generate_service_time(&self) -> f64 {
-        let exp = Exp::new(self.mu).unwrap();
-        exp.sample(&mut rand::thread_rng())
+    // /// Generate service time (exponential with rate mu)
+    // fn generate_service_time(&self) -> f64 {
+    //     let exp = Exp::new(self.mu).unwrap();
+    //     exp.sample(&mut rand::thread_rng())
+    // }
+
+    
+    /// Generate next event time using inverse transform method
+    fn generate_next_time(&self, rate: f64, previous_time: f64) -> f64 {
+        // 1. Generate uniform random number in [0,1]
+        let z: f64 = rand::thread_rng().gen();
+        
+        // 2. Apply inverse transform: F^(-1)(z) = -ln(1-z)/rate for exponential distribution
+        let x = -((1.0 - z).ln()) / rate;
+        
+        // 3. ti = x + ti-1
+        previous_time + x
     }
 
     /// Update statistics when state changes
@@ -93,8 +114,8 @@ impl Simulation {
     }
     
     /// Handle an arrival event
-    fn handle_arrival(&mut self, event_time: f64) {
-        // Update statistics for time period since last event
+    fn handle_arrival(&mut self, event_time: f64, customer_id: u32) {
+        // Update statistics
         let time_delta = event_time - self.current_time;
         self.update_stats(time_delta);
         
@@ -103,27 +124,37 @@ impl Simulation {
         self.customers_in_system += 1;
         self.total_customers += 1;
 
+        // Store arrival time for response time calculation
+        self.arrival_times.insert(customer_id, event_time);
+
         // Schedule next arrival
-        let next_arrival_time = self.current_time + self.generate_interarrival_time();
+        let next_arrival_time = self.generate_next_time(self.lambda, event_time);
         self.event_queue.push_back(Event {
             time: next_arrival_time,
-            event_type: EventType::Arrival,
+            event_type: EventType::Arrival { customer_id: customer_id + 1 },
         });
 
         // If this is the only customer, schedule their departure
         if self.customers_in_system == 1 {
-            let departure_time = self.current_time + self.generate_service_time();
+            let departure_time = self.generate_next_time(self.mu, event_time);
             self.event_queue.push_back(Event {
                 time: departure_time,
-                event_type: EventType::Departure,
+                event_type: EventType::Departure { customer_id },
             });
         }
     }
     /// Handle a departure event
-    fn handle_departure(&mut self, event_time: f64) {
-        // Update statistics for time period since last event
+    fn handle_departure(&mut self, event_time: f64, customer_id: u32) {
+        // Update statistics
         let time_delta = event_time - self.current_time;
         self.update_stats(time_delta);
+
+        // Calculate response time for this customer
+        if let Some(arrival_time) = self.arrival_times.remove(&customer_id) {
+            let response_time = event_time - arrival_time;
+            self.total_response_time += response_time;
+            self.completed_customers += 1;
+        }
 
         // Update current time and decrement customers
         self.current_time = event_time;
@@ -131,21 +162,34 @@ impl Simulation {
 
         // If there are more customers, schedule next departure
         if self.customers_in_system > 0 {
-            let departure_time = self.current_time + self.generate_service_time();
+            let departure_time = self.generate_next_time(self.mu, event_time);
             self.event_queue.push_back(Event {
                 time: departure_time,
-                event_type: EventType::Departure,
+                event_type: EventType::Departure { 
+                    customer_id: customer_id + 1 
+                },
             });
         }
     }
-    /// Run simulation for a specified number of customers
+    /// Calculate E[N] using Little's Law
+    fn get_en_littles_law(&self) -> f64 {
+        let avg_response_time = if self.completed_customers > 0 {
+            self.total_response_time / self.completed_customers as f64
+        } else {
+            0.0
+        };
+        self.lambda * avg_response_time  // E[N] = λ * E[D]
+    }
     fn run(&mut self, total_customers_to_process: u32) {
         // Schedule first arrival
-        self.schedule_initial_arrival();
+        self.event_queue.push_back(Event {
+            time: self.generate_next_time(self.lambda, 0.0),
+            event_type: EventType::Arrival { customer_id: 0 },
+        });
 
         // Process events until we've served enough customers
-        while self.total_customers < total_customers_to_process {
-            // Sort events by time if necessary
+        while self.completed_customers < total_customers_to_process {
+            // Sort events by time
             self.event_queue.make_contiguous();
             let mut events: Vec<_> = self.event_queue.drain(..).collect();
             events.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
@@ -154,21 +198,24 @@ impl Simulation {
             // Process next event
             if let Some(event) = self.event_queue.pop_front() {
                 match event.event_type {
-                    EventType::Arrival => self.handle_arrival(event.time),
-                    EventType::Departure => self.handle_departure(event.time),
+                    EventType::Arrival { customer_id } => 
+                        self.handle_arrival(event.time, customer_id),
+                    EventType::Departure { customer_id } => 
+                        self.handle_departure(event.time, customer_id),
                 }
             }
         }
     }
 
-    /// Print simulation results
     fn print_results(&self) {
         println!("\nSimulation Results:");
-        println!("Load (rho) = {:.3}", self.rho);
-        println!("Total customers processed: {}", self.total_customers);
-        println!("Simulated average customers in system: {:.3}", self.get_average_customers());
-        println!("Theoretical average customers in system: {:.3}", self.get_theoretical_average());
-        println!("Total simulation time: {:.3}", self.cumulative_time);
+        println!("Load (ρ) = {:.3}", self.rho);
+        println!("Total customers processed: {}", self.completed_customers);
+        println!("Average response time E[D]: {:.3}", 
+                self.total_response_time / self.completed_customers as f64);
+        println!("E[N] (direct measurement): {:.3}", self.get_average_customers());
+        println!("E[N] (Little's Law): {:.3}", self.get_en_littles_law());
+        println!("Theoretical E[N]: {:.3}", self.get_theoretical_average());
     }
 
     /// Run simulation and return results
