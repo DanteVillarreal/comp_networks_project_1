@@ -1,6 +1,5 @@
 use std::collections::{VecDeque, HashMap};
 use rand::Rng;
-use rand_distr::{Distribution, Exp};
 use plotters::prelude::*;
 
 #[derive(Debug)]
@@ -20,7 +19,6 @@ struct SimulationResult {
     rho: f64,
     simulated_average: f64,
     theoretical_average: f64,
-    littles_law_average: f64,
 }
 
 struct Simulation {
@@ -56,14 +54,12 @@ impl Simulation {
         }
     }
 
-    /// Generate next event time using inverse transform method
     fn generate_next_time(&self, rate: f64, previous_time: f64) -> f64 {
         let z: f64 = rand::thread_rng().gen();
         let x = -((1.0 - z).ln()) / rate;
         previous_time + x
     }
 
-    /// Update statistics when state changes
     fn update_stats(&mut self, time_delta: f64) {
         self.cumulative_time += time_delta;
         self.cumulative_customers += self.customers_in_system as f64 * time_delta;
@@ -128,17 +124,7 @@ impl Simulation {
         self.rho / (1.0 - self.rho)
     }
 
-    fn get_en_littles_law(&self) -> f64 {
-        let avg_response_time = if self.completed_customers > 0 {
-            self.total_response_time / self.completed_customers as f64
-        } else {
-            0.0
-        };
-        self.lambda * avg_response_time
-    }
-
     fn run(&mut self, total_customers_to_process: u32) {
-        // Schedule first arrival
         self.event_queue.push_back(Event {
             time: self.generate_next_time(self.lambda, 0.0),
             event_type: EventType::Arrival { customer_id: 0 },
@@ -168,7 +154,6 @@ impl Simulation {
             rho: self.rho,
             simulated_average: self.get_average_customers(),
             theoretical_average: self.get_theoretical_average(),
-            littles_law_average: self.get_en_littles_law(),
         }
     }
 
@@ -179,24 +164,25 @@ impl Simulation {
         println!("Average response time E[D]: {:.3}", 
                 self.total_response_time / self.completed_customers as f64);
         println!("E[N] (direct measurement): {:.3}", self.get_average_customers());
-        println!("E[N] (Little's Law): {:.3}", self.get_en_littles_law());
         println!("Theoretical E[N]: {:.3}", self.get_theoretical_average());
         println!("Total simulation time: {:.3}", self.cumulative_time);
     }
 }
 
-fn create_comparison_plot(results: &[SimulationResult]) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new("mm1_queue_results.png", (800, 600))
+fn create_comparison_plot(results: &[SimulationResult], customers: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let filename = format!("mm1_queue_results_{}_customers.png", customers);
+    let root = BitMapBackend::new(&filename, (800, 600))
         .into_drawing_area();
     
     root.fill(&WHITE)?;
 
     let max_y = results.iter()
-        .map(|r| r.simulated_average.max(r.theoretical_average).max(r.littles_law_average))
+        .map(|r| r.simulated_average.max(r.theoretical_average))
         .fold(f64::NEG_INFINITY, f64::max) * 1.1;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption("M/M/1 Queue Simulation Results", ("sans-serif", 30).into_font())
+        .caption(format!("M/M/1 Queue Simulation Results ({} Customers)", customers), 
+                ("sans-serif", 30).into_font())
         .margin(5)
         .x_label_area_size(40)
         .y_label_area_size(40)
@@ -221,12 +207,6 @@ fn create_comparison_plot(results: &[SimulationResult]) -> Result<(), Box<dyn st
     }))?.label("Simulated")
         .legend(|(x, y)| Circle::new((x + 10, y), 5, BLUE.filled()));
 
-    // Plot Little's Law values
-    chart.draw_series(results.iter().map(|r| {
-        Circle::new((r.rho, r.littles_law_average), 5, GREEN.filled())
-    }))?.label("Little's Law")
-        .legend(|(x, y)| Circle::new((x + 10, y), 5, GREEN.filled()));
-
     chart
         .configure_series_labels()
         .background_style(WHITE.mix(0.8))
@@ -241,19 +221,24 @@ fn create_comparison_plot(results: &[SimulationResult]) -> Result<(), Box<dyn st
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mu = 1.0;
     let loads = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-    let mut results = Vec::new();
+    let customer_counts = vec![100, 1000, 5000, 10000, 50000];
 
-    for &rho in &loads {
-        println!("\nRunning simulation for ρ = {}", rho);
-        let lambda = rho * mu;
-        let mut simulation = Simulation::new(lambda, mu);
-        let result = simulation.run_and_get_results(10000);
-        simulation.print_results();
-        results.push(result);
+    for &customer_count in &customer_counts {
+        println!("\nRunning simulations for {} customers", customer_count);
+        let mut results = Vec::new();
+        
+        for &rho in &loads {
+            println!("  Running simulation for ρ = {}", rho);
+            let lambda = rho * mu;
+            let mut simulation = Simulation::new(lambda, mu);
+            let result = simulation.run_and_get_results(customer_count);
+            simulation.print_results();
+            results.push(result);
+        }
+
+        create_comparison_plot(&results, customer_count)?;
+        println!("Plot has been saved as 'mm1_queue_results_{}_customers.png'", customer_count);
     }
-
-    create_comparison_plot(&results)?;
-    println!("\nPlot has been saved as 'mm1_queue_results.png'");
 
     Ok(())
 }
