@@ -1,5 +1,6 @@
 The executable code is in:
 executable_file.exe
+You can just download this file, run it, and it will produce all the graphs and the text outputs
 
 The Papers are in:
 Analysis
